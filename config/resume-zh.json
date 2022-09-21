@@ -23,7 +23,7 @@
   "weight_decay": 0,
   "clip_grad_norm": 5.0,
 
-  "bert_name": "bert-base-chinese",
+  "bert_name": "D:\\code\\pretrain_model_dir\\bert-base-chinese",
   "bert_learning_rate": 5e-6,
   "warm_factor": 0.1,
 
