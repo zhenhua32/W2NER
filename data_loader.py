@@ -9,9 +9,11 @@ from transformers import AutoTokenizer
 import os
 import utils
 import requests
+
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-dis2idx = np.zeros((1000), dtype='int64')
+# 从 0 到 9, 每个数字 N 的长度是 2 ** (N - 1)
+dis2idx = np.zeros((1000), dtype="int64")
 dis2idx[1] = 1
 dis2idx[2:] = 2
 dis2idx[4:] = 3
@@ -24,9 +26,13 @@ dis2idx[256:] = 9
 
 
 class Vocabulary(object):
-    PAD = '<pad>'
-    UNK = '<unk>'
-    SUC = '<suc>'
+    """
+    统一进行小写处理的词汇表, uncased
+    """
+
+    PAD = "<pad>"
+    UNK = "<unk>"
+    SUC = "<suc>"
 
     def __init__(self):
         self.label2id = {self.PAD: 0, self.SUC: 1}
@@ -41,7 +47,7 @@ class Vocabulary(object):
         assert label == self.id2label[self.label2id[label]]
 
     def __len__(self):
-        return len(self.token2id)
+        return len(self.label2id)
 
     def label_to_id(self, label):
         label = label.lower()
@@ -49,6 +55,7 @@ class Vocabulary(object):
 
     def id_to_label(self, i):
         return self.id2label[i]
+
 
 def collate_fn(data):
     bert_inputs, grid_labels, grid_mask2d, pieces2word, dist_inputs, sent_length, entity_text = map(list, zip(*data))
@@ -61,7 +68,7 @@ def collate_fn(data):
 
     def fill(data, new_data):
         for j, x in enumerate(data):
-            new_data[j, :x.shape[0], :x.shape[1]] = x
+            new_data[j, : x.shape[0], : x.shape[1]] = x
         return new_data
 
     dis_mat = torch.zeros((batch_size, max_tok, max_tok), dtype=torch.long)
@@ -77,6 +84,10 @@ def collate_fn(data):
 
 
 class RelationDataset(Dataset):
+    """
+    构建数据集
+    """
+
     def __init__(self, bert_inputs, grid_labels, grid_mask2d, pieces2word, dist_inputs, sent_length, entity_text):
         self.bert_inputs = bert_inputs
         self.grid_labels = grid_labels
@@ -87,20 +98,24 @@ class RelationDataset(Dataset):
         self.entity_text = entity_text
 
     def __getitem__(self, item):
-        return torch.LongTensor(self.bert_inputs[item]), \
-               torch.LongTensor(self.grid_labels[item]), \
-               torch.LongTensor(self.grid_mask2d[item]), \
-               torch.LongTensor(self.pieces2word[item]), \
-               torch.LongTensor(self.dist_inputs[item]), \
-               self.sent_length[item], \
-               self.entity_text[item]
+        return (
+            torch.LongTensor(self.bert_inputs[item]),
+            torch.LongTensor(self.grid_labels[item]),
+            torch.LongTensor(self.grid_mask2d[item]),
+            torch.LongTensor(self.pieces2word[item]),
+            torch.LongTensor(self.dist_inputs[item]),
+            self.sent_length[item],
+            self.entity_text[item],
+        )
 
     def __len__(self):
         return len(self.bert_inputs)
 
 
 def process_bert(data, tokenizer, vocab):
-
+    """
+    处理 bert 数据
+    """
     bert_inputs = []
     grid_labels = []
     grid_mask2d = []
@@ -110,33 +125,48 @@ def process_bert(data, tokenizer, vocab):
     sent_length = []
 
     for index, instance in enumerate(data):
-        if len(instance['sentence']) == 0:
+        if len(instance["sentence"]) == 0:
             continue
 
-        tokens = [tokenizer.tokenize(word) for word in instance['sentence']]
+        # 对序列中的每个词进行分词, 获得词块
+        tokens = [tokenizer.tokenize(word) for word in instance["sentence"]]
         pieces = [piece for pieces in tokens for piece in pieces]
         _bert_inputs = tokenizer.convert_tokens_to_ids(pieces)
         _bert_inputs = np.array([tokenizer.cls_token_id] + _bert_inputs + [tokenizer.sep_token_id])
 
-        length = len(instance['sentence'])
-        _grid_labels = np.zeros((length, length), dtype=np.int)
-        _pieces2word = np.zeros((length, len(_bert_inputs)), dtype=np.bool)
-        _dist_inputs = np.zeros((length, length), dtype=np.int)
-        _grid_mask2d = np.ones((length, length), dtype=np.bool)
+        # 输入的序列长度
+        length = len(instance["sentence"])
+        # 不知道这几个矩阵有啥用, 看图应该是核心结构
+        _grid_labels = np.zeros((length, length), dtype=np.int32)
+        _pieces2word = np.zeros((length, len(_bert_inputs)), dtype=np.bool_)
+        _dist_inputs = np.zeros((length, length), dtype=np.int32)
+        _grid_mask2d = np.ones((length, length), dtype=np.bool_)
 
+        # 人傻啦, 这还能是 None 的?
         if tokenizer is not None:
             start = 0
             for i, pieces in enumerate(tokens):
                 if len(pieces) == 0:
                     continue
+                # [start: start+N], N 是词块的长度
                 pieces = list(range(start, start + len(pieces)))
-                _pieces2word[i, pieces[0] + 1:pieces[-1] + 2] = 1
+                # 应该就是指向下一个词
+                # 填充 _pieces2word, i 是序列的第 N 个词, [start+1: start+N+2] = 1
+                _pieces2word[i, pieces[0] + 1 : pieces[-1] + 2] = 1
                 start += len(pieces)
 
+        # 构建这样一个矩阵
+        # [[ 0, -1, -2, -3, -4, -5],
+        # [ 1,  0, -1, -2, -3, -4],
+        # [ 2,  1,  0, -1, -2, -3],
+        # [ 3,  2,  1,  0, -1, -2],
+        # [ 4,  3,  2,  1,  0, -1],
+        # [ 5,  4,  3,  2,  1,  0]]
         for k in range(length):
             _dist_inputs[k, :] += k
             _dist_inputs[:, k] -= k
 
+        # 不理解是什么操作
         for i in range(length):
             for j in range(length):
                 if _dist_inputs[i, j] < 0:
@@ -148,13 +178,17 @@ def process_bert(data, tokenizer, vocab):
         for entity in instance["ner"]:
             index = entity["index"]
             for i in range(len(index)):
+                # 不要最后一位
                 if i + 1 >= len(index):
                     break
                 _grid_labels[index[i], index[i + 1]] = 1
+            # 将最后一位的, 设置为标签对应的 id
             _grid_labels[index[-1], index[0]] = vocab.label_to_id(entity["type"])
 
-        _entity_text = set([utils.convert_index_to_text(e["index"], vocab.label_to_id(e["type"]))
-                            for e in instance["ner"]])
+        # 生成一个特定格式的文本, 结构形如 0-1-2-#-id, -#- 前面是索引列表, 后面是标签对应的 id
+        _entity_text = set(
+            [utils.convert_index_to_text(e["index"], vocab.label_to_id(e["type"])) for e in instance["ner"]]
+        )
 
         sent_length.append(length)
         bert_inputs.append(_bert_inputs)
@@ -168,6 +202,9 @@ def process_bert(data, tokenizer, vocab):
 
 
 def fill_vocab(vocab, dataset):
+    """
+    将所有的 ner 标签添加到词汇表中
+    """
     entity_num = 0
     for instance in dataset:
         for entity in instance["ner"]:
@@ -177,26 +214,32 @@ def fill_vocab(vocab, dataset):
 
 
 def load_data_bert(config):
-    with open('./data/{}/train.json'.format(config.dataset), 'r', encoding='utf-8') as f:
+    """
+    加载数据集
+    """
+    with open("./data/{}/train.json".format(config.dataset), "r", encoding="utf-8") as f:
         train_data = json.load(f)
-    with open('./data/{}/dev.json'.format(config.dataset), 'r', encoding='utf-8') as f:
+    with open("./data/{}/dev.json".format(config.dataset), "r", encoding="utf-8") as f:
         dev_data = json.load(f)
-    with open('./data/{}/test.json'.format(config.dataset), 'r', encoding='utf-8') as f:
+    with open("./data/{}/test.json".format(config.dataset), "r", encoding="utf-8") as f:
         test_data = json.load(f)
 
     tokenizer = AutoTokenizer.from_pretrained(config.bert_name, cache_dir="./cache/")
 
+    # 从所有数据集中构建词汇表, 这是词汇表是 ner 的词汇
     vocab = Vocabulary()
     train_ent_num = fill_vocab(vocab, train_data)
     dev_ent_num = fill_vocab(vocab, dev_data)
     test_ent_num = fill_vocab(vocab, test_data)
 
-    table = pt.PrettyTable([config.dataset, 'sentences', 'entities'])
-    table.add_row(['train', len(train_data), train_ent_num])
-    table.add_row(['dev', len(dev_data), dev_ent_num])
-    table.add_row(['test', len(test_data), test_ent_num])
+    # PrettyTable 就是个文本显示表格用的, ASCII table format 可视化
+    table = pt.PrettyTable([config.dataset, "sentences", "entities"])
+    table.add_row(["train", len(train_data), train_ent_num])
+    table.add_row(["dev", len(dev_data), dev_ent_num])
+    table.add_row(["test", len(test_data), test_ent_num])
     config.logger.info("\n{}".format(table))
 
+    # 标签数量
     config.label_num = len(vocab.label2id)
     config.vocab = vocab
 
@@ -204,4 +247,3 @@ def load_data_bert(config):
     dev_dataset = RelationDataset(*process_bert(dev_data, tokenizer, vocab))
     test_dataset = RelationDataset(*process_bert(test_data, tokenizer, vocab))
     return (train_dataset, dev_dataset, test_dataset), (train_data, dev_data, test_data)
-

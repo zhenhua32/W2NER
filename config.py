@@ -3,6 +3,7 @@ import json
 
 class Config:
     def __init__(self, args):
+        # 从文件中读取配置
         with open(args.config, "r", encoding="utf-8") as f:
             config = json.load(f)
 
@@ -38,6 +39,7 @@ class Config:
 
         self.seed = config["seed"]
 
+        # 如果配置在 args 中, 且 v 不是空的, 就覆盖
         for k, v in args.__dict__.items():
             if v is not None:
                 self.__dict__[k] = v
