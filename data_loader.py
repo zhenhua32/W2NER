@@ -13,6 +13,7 @@ import requests
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 # 从 0 到 9, 每个数字 N 的长度是 2 ** (N - 1)
+# WARN, 最大就处理长度为 1000 的序列. bert 模型也就 512 的长度.
 dis2idx = np.zeros((1000), dtype="int64")
 dis2idx[1] = 1
 dis2idx[2:] = 2
