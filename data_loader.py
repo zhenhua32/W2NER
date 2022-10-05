@@ -1,4 +1,4 @@
-import json
+import ujson as json
 import torch
 from torch.utils.data import Dataset
 from torch.nn.utils.rnn import pad_sequence
@@ -8,7 +8,7 @@ from gensim.models import KeyedVectors
 from transformers import AutoTokenizer
 import os
 import utils
-import requests
+from tqdm import tqdm
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -116,6 +116,7 @@ class RelationDataset(Dataset):
 def process_bert(data, tokenizer, vocab):
     """
     处理 bert 数据
+    TODO: 主要的时间还是花在这里, 每秒大概 700 个, 另一个问题是内存增长
     """
     bert_inputs = []
     grid_labels = []
@@ -125,7 +126,7 @@ def process_bert(data, tokenizer, vocab):
     pieces2word = []
     sent_length = []
 
-    for index, instance in enumerate(data):
+    for index, instance in tqdm(enumerate(data)):
         if len(instance["sentence"]) == 0:
             continue
 
@@ -225,9 +226,9 @@ def load_data_bert(config):
     with open("./data/{}/test.json".format(config.dataset), "r", encoding="utf-8") as f:
         test_data = json.load(f)
 
-    tokenizer = AutoTokenizer.from_pretrained(config.bert_name, cache_dir="./cache/")
+    tokenizer = AutoTokenizer.from_pretrained(config.bert_name, cache_dir="./cache/", use_fast=True)
 
-    # 从所有数据集中构建词汇表, 这是词汇表是 ner 的词汇
+    # 从所有数据集中构建词汇表, 这个词汇表是 ner 的词汇
     vocab = Vocabulary()
     train_ent_num = fill_vocab(vocab, train_data)
     dev_ent_num = fill_vocab(vocab, dev_data)

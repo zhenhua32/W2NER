@@ -7,8 +7,11 @@ class Config:
         with open(args.config, "r", encoding="utf-8") as f:
             config = json.load(f)
 
+        # 数据集目录
         self.dataset = config["dataset"]
+        # 模型保存路径
         self.save_path = config["save_path"]
+        # 预测文件输出路径
         self.predict_path = config["predict_path"]
 
         self.dist_emb_size = config["dist_emb_size"]
