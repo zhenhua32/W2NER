@@ -49,7 +49,7 @@ class Trainer(object):
         label_result = []
 
         for i, data_batch in enumerate(data_loader):
-            data_batch = [data.cuda() for data in data_batch[:-1]]
+            data_batch = [data.to(device) for data in data_batch[:-1]]
 
             bert_inputs, grid_labels, grid_mask2d, pieces2word, dist_inputs, sent_length = data_batch
 
@@ -96,7 +96,7 @@ class Trainer(object):
         with torch.no_grad():
             for i, data_batch in enumerate(data_loader):
                 entity_text = data_batch[-1]
-                data_batch = [data.cuda() for data in data_batch[:-1]]
+                data_batch = [data.to(device) for data in data_batch[:-1]]
                 bert_inputs, grid_labels, grid_mask2d, pieces2word, dist_inputs, sent_length = data_batch
 
                 outputs = model(bert_inputs, grid_mask2d, dist_inputs, pieces2word, sent_length)
@@ -150,7 +150,7 @@ class Trainer(object):
             for data_batch in data_loader:
                 sentence_batch = data[i : i + config.batch_size]
                 entity_text = data_batch[-1]
-                data_batch = [data.cuda() for data in data_batch[:-1]]
+                data_batch = [data.to(device) for data in data_batch[:-1]]
                 bert_inputs, grid_labels, grid_mask2d, pieces2word, dist_inputs, sent_length = data_batch
 
                 outputs = model(bert_inputs, grid_mask2d, dist_inputs, pieces2word, sent_length)
@@ -254,8 +254,7 @@ if __name__ == "__main__":
     logger.info(config)
     config.logger = logger
 
-    if torch.cuda.is_available():
-        torch.cuda.set_device(args.device)
+    device = f"cuda:{args.device}" if torch.cuda.is_available() else "cpu"
 
     # random.seed(config.seed)
     # np.random.seed(config.seed)
@@ -284,8 +283,7 @@ if __name__ == "__main__":
 
     logger.info("Building Model")
     model = Model(config)
-
-    model = model.cuda()
+    model = model.to(device)
 
     trainer = Trainer(model)
 
@@ -296,7 +294,8 @@ if __name__ == "__main__":
         trainer.train(i, train_loader)
         f1 = trainer.eval(i, dev_loader)
         test_f1 = trainer.eval(i, test_loader, is_test=True)
-        if f1 > best_f1:
+        # 当大于等于时保存, 即使第一轮效果很差, 为 0 的时候也保存下
+        if f1 >= best_f1:
             best_f1 = f1
             best_test_f1 = test_f1
             trainer.save(config.save_path)
