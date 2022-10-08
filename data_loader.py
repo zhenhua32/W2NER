@@ -9,6 +9,9 @@ from transformers import AutoTokenizer
 import os
 import utils
 from tqdm import tqdm
+from tqdm.contrib.concurrent import process_map
+from functools import partial
+
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -113,6 +116,75 @@ class RelationDataset(Dataset):
         return len(self.bert_inputs)
 
 
+def process_bert_one(instance, tokenizer, vocab):
+    """
+    处理单条数据, 便于并行化
+    """
+    # 对序列中的每个词进行分词, 获得词块
+    tokens = [tokenizer.tokenize(word) for word in instance["sentence"]]
+    pieces = [piece for pieces in tokens for piece in pieces]
+    _bert_inputs = tokenizer.convert_tokens_to_ids(pieces)
+    _bert_inputs = np.array([tokenizer.cls_token_id] + _bert_inputs + [tokenizer.sep_token_id])
+
+    # 输入的序列长度
+    length = len(instance["sentence"])
+    # 不知道这几个矩阵有啥用, 看图应该是核心结构
+    _grid_labels = np.zeros((length, length), dtype=np.int32)
+    _pieces2word = np.zeros((length, len(_bert_inputs)), dtype=np.bool_)
+    _dist_inputs = np.zeros((length, length), dtype=np.int32)
+    _grid_mask2d = np.ones((length, length), dtype=np.bool_)
+
+    # 人傻啦, 这还能是 None 的?
+    if tokenizer is not None:
+        start = 0
+        for i, pieces in enumerate(tokens):
+            if len(pieces) == 0:
+                continue
+            # [start: start+N], N 是词块的长度
+            pieces = list(range(start, start + len(pieces)))
+            # 应该就是指向下一个词
+            # 填充 _pieces2word, i 是序列的第 N 个词, [start+1: start+N+2] = 1
+            _pieces2word[i, pieces[0] + 1 : pieces[-1] + 2] = 1
+            start += len(pieces)
+
+    # 构建这样一个矩阵
+    # [[ 0, -1, -2, -3, -4, -5],
+    # [ 1,  0, -1, -2, -3, -4],
+    # [ 2,  1,  0, -1, -2, -3],
+    # [ 3,  2,  1,  0, -1, -2],
+    # [ 4,  3,  2,  1,  0, -1],
+    # [ 5,  4,  3,  2,  1,  0]]
+    for k in range(length):
+        _dist_inputs[k, :] += k
+        _dist_inputs[:, k] -= k
+
+    # 不理解是什么操作
+    for i in range(length):
+        for j in range(length):
+            if _dist_inputs[i, j] < 0:
+                _dist_inputs[i, j] = dis2idx[-_dist_inputs[i, j]] + 9
+            else:
+                _dist_inputs[i, j] = dis2idx[_dist_inputs[i, j]]
+    _dist_inputs[_dist_inputs == 0] = 19
+
+    for entity in instance["ner"]:
+        index = entity["index"]
+        for i in range(len(index)):
+            # 不要最后一位
+            if i + 1 >= len(index):
+                break
+            _grid_labels[index[i], index[i + 1]] = 1
+        # 将最后一位的, 设置为标签对应的 id
+        _grid_labels[index[-1], index[0]] = vocab.label_to_id(entity["type"])
+
+    # 生成一个特定格式的文本, 结构形如 0-1-2-#-id, -#- 前面是索引列表, 后面是标签对应的 id
+    _entity_text = set(
+        [utils.convert_index_to_text(e["index"], vocab.label_to_id(e["type"])) for e in instance["ner"]]
+    )
+
+    return length, _bert_inputs, _grid_labels, _grid_mask2d, _dist_inputs, _pieces2word, _entity_text
+
+
 def process_bert(data, tokenizer, vocab):
     """
     处理 bert 数据
@@ -130,68 +202,34 @@ def process_bert(data, tokenizer, vocab):
         if len(instance["sentence"]) == 0:
             continue
 
-        # 对序列中的每个词进行分词, 获得词块
-        tokens = [tokenizer.tokenize(word) for word in instance["sentence"]]
-        pieces = [piece for pieces in tokens for piece in pieces]
-        _bert_inputs = tokenizer.convert_tokens_to_ids(pieces)
-        _bert_inputs = np.array([tokenizer.cls_token_id] + _bert_inputs + [tokenizer.sep_token_id])
+        length, _bert_inputs, _grid_labels, _grid_mask2d, _dist_inputs, _pieces2word, _entity_text = process_bert_one(instance, tokenizer, vocab)
 
-        # 输入的序列长度
-        length = len(instance["sentence"])
-        # 不知道这几个矩阵有啥用, 看图应该是核心结构
-        _grid_labels = np.zeros((length, length), dtype=np.int32)
-        _pieces2word = np.zeros((length, len(_bert_inputs)), dtype=np.bool_)
-        _dist_inputs = np.zeros((length, length), dtype=np.int32)
-        _grid_mask2d = np.ones((length, length), dtype=np.bool_)
+        sent_length.append(length)
+        bert_inputs.append(_bert_inputs)
+        grid_labels.append(_grid_labels)
+        grid_mask2d.append(_grid_mask2d)
+        dist_inputs.append(_dist_inputs)
+        pieces2word.append(_pieces2word)
+        entity_text.append(_entity_text)
 
-        # 人傻啦, 这还能是 None 的?
-        if tokenizer is not None:
-            start = 0
-            for i, pieces in enumerate(tokens):
-                if len(pieces) == 0:
-                    continue
-                # [start: start+N], N 是词块的长度
-                pieces = list(range(start, start + len(pieces)))
-                # 应该就是指向下一个词
-                # 填充 _pieces2word, i 是序列的第 N 个词, [start+1: start+N+2] = 1
-                _pieces2word[i, pieces[0] + 1 : pieces[-1] + 2] = 1
-                start += len(pieces)
+    return bert_inputs, grid_labels, grid_mask2d, pieces2word, dist_inputs, sent_length, entity_text
 
-        # 构建这样一个矩阵
-        # [[ 0, -1, -2, -3, -4, -5],
-        # [ 1,  0, -1, -2, -3, -4],
-        # [ 2,  1,  0, -1, -2, -3],
-        # [ 3,  2,  1,  0, -1, -2],
-        # [ 4,  3,  2,  1,  0, -1],
-        # [ 5,  4,  3,  2,  1,  0]]
-        for k in range(length):
-            _dist_inputs[k, :] += k
-            _dist_inputs[:, k] -= k
 
-        # 不理解是什么操作
-        for i in range(length):
-            for j in range(length):
-                if _dist_inputs[i, j] < 0:
-                    _dist_inputs[i, j] = dis2idx[-_dist_inputs[i, j]] + 9
-                else:
-                    _dist_inputs[i, j] = dis2idx[_dist_inputs[i, j]]
-        _dist_inputs[_dist_inputs == 0] = 19
+def process_bert_multiprocess(data, tokenizer, vocab):
+    cpu_count = os.cpu_count()
+    func = partial(process_bert_one, tokenizer=tokenizer, vocab=vocab)
+    result = process_map(func, data, max_workers=cpu_count, chunksize=100)
 
-        for entity in instance["ner"]:
-            index = entity["index"]
-            for i in range(len(index)):
-                # 不要最后一位
-                if i + 1 >= len(index):
-                    break
-                _grid_labels[index[i], index[i + 1]] = 1
-            # 将最后一位的, 设置为标签对应的 id
-            _grid_labels[index[-1], index[0]] = vocab.label_to_id(entity["type"])
-
-        # 生成一个特定格式的文本, 结构形如 0-1-2-#-id, -#- 前面是索引列表, 后面是标签对应的 id
-        _entity_text = set(
-            [utils.convert_index_to_text(e["index"], vocab.label_to_id(e["type"])) for e in instance["ner"]]
-        )
-
+    # 要拆解为多个数组
+    bert_inputs = []
+    grid_labels = []
+    grid_mask2d = []
+    dist_inputs = []
+    entity_text = []
+    pieces2word = []
+    sent_length = []
+    for x in result:
+        length, _bert_inputs, _grid_labels, _grid_mask2d, _dist_inputs, _pieces2word, _entity_text = x
         sent_length.append(length)
         bert_inputs.append(_bert_inputs)
         grid_labels.append(_grid_labels)
@@ -245,7 +283,7 @@ def load_data_bert(config):
     config.label_num = len(vocab.label2id)
     config.vocab = vocab
 
-    train_dataset = RelationDataset(*process_bert(train_data, tokenizer, vocab))
-    dev_dataset = RelationDataset(*process_bert(dev_data, tokenizer, vocab))
-    test_dataset = RelationDataset(*process_bert(test_data, tokenizer, vocab))
+    train_dataset = RelationDataset(*process_bert_multiprocess(train_data, tokenizer, vocab))
+    dev_dataset = RelationDataset(*process_bert_multiprocess(dev_data, tokenizer, vocab))
+    test_dataset = RelationDataset(*process_bert_multiprocess(test_data, tokenizer, vocab))
     return (train_dataset, dev_dataset, test_dataset), (train_data, dev_data, test_data)
